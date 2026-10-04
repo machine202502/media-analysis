@@ -1359,6 +1359,23 @@ def list_building_indexes() -> list[dict]:
         )
 
 
+def list_index_entries(index_id: UUID, limit: int = 60) -> list[dict]:
+    with connection() as conn:
+        return list(
+            conn.execute(
+                """
+                SELECT e.id, e.start_sec, e.end_sec, e.text, i.name
+                FROM index_entries e
+                JOIN indexes i ON i.id = e.index_id
+                WHERE e.index_id = %s AND i.status = 'ready'
+                ORDER BY e.start_sec, e.id
+                LIMIT %s
+                """,
+                (index_id, limit),
+            ).fetchall()
+        )
+
+
 def search_index_entries(index_id: UUID, vector: list[float], limit: int) -> list[dict]:
     encoded = to_vector(vector)
     with connection() as conn:

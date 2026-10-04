@@ -7,8 +7,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
-from app.speech.merge import apply_cut, cut_owner, stitch_segments
+from app.speech.merge import apply_cut, cut_owner, cut_phrase, stitch_segments
 
 
 def _turn(speaker: str, text: str, start: float, end: float, words: list | None = None) -> dict:
@@ -36,6 +37,19 @@ def _broken(pairs: set[tuple[str, str]]):
 
 
 class MeaningStitchTests(unittest.TestCase):
+    def test_a_rambling_answer_is_asked_again(self) -> None:
+        answers = iter(["Анализ стыка между A и B:", "ДА"])
+        with patch("app.speech.merge.generate", side_effect=lambda *_args, **_kwargs: next(answers)) as generate:
+            joined = cut_phrase("Мы", "зовём гостей дальше", "model")
+        self.assertTrue(joined)
+        self.assertEqual(generate.call_count, 2)
+
+    def test_two_rambling_answers_leave_the_junction(self) -> None:
+        with patch("app.speech.merge.generate", return_value="Анализ стыка между A и B:") as generate:
+            joined = cut_phrase("Мы", "зовём гостей дальше", "model")
+        self.assertFalse(joined)
+        self.assertEqual(generate.call_count, 2)
+
     def test_same_speaker_joins_the_whole_next_turn(self) -> None:
         left = _turn("SPEAKER_00", "Он сам признаёт. Мы", 0, 2)
         right = _turn("SPEAKER_00", "зовём гостей, которые ждали", 2, 4)

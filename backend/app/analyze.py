@@ -401,7 +401,7 @@ def process_job(job: dict) -> None:
                 folder=work / "merge",
             )
         except Exception as error:
-            warning = _note(warning, f"Склейка не выполнена: {error}")
+            print(f"склейка продолжена без остановки: {error}", flush=True)
         save_json(work / DOCUMENT, document)
 
     if pending("correcting"):
@@ -415,7 +415,7 @@ def process_job(job: dict) -> None:
                 folder=work / "correct",
             )
         except Exception as error:
-            warning = _note(warning, f"Правка текста не выполнена: {error}")
+            print(f"правка продолжена без остановки: {error}", flush=True)
         try:
             document = anglicize_document(
                 document,
@@ -424,7 +424,7 @@ def process_job(job: dict) -> None:
                 folder=work / "anglic",
             )
         except Exception as error:
-            warning = _note(warning, f"Английские написания не проставлены: {error}")
+            print(f"английские написания продолжены без остановки: {error}", flush=True)
         save_json(work / DOCUMENT, document)
 
     if pending("splitting"):
@@ -432,7 +432,7 @@ def process_job(job: dict) -> None:
         try:
             document = split_document(document, on_ratio=_band(video_id, "splitting", 0.93, 0.96), folder=work / "split")
         except Exception as error:
-            warning = _note(warning, f"Разбивка текста не выполнена: {error}")
+            print(f"разбивка продолжена без остановки: {error}", flush=True)
         save_json(work / DOCUMENT, document)
 
     if pending("embedding"):
@@ -450,18 +450,16 @@ def process_job(job: dict) -> None:
             build_moments(video_id, on_ratio=_band(video_id, "moments", 0.97, 0.99))
             built = moments_index(video_id)
             if built and built["status"] == "error":
-                warning = _note(warning, f"Ключевые моменты не собрались: {built.get('error') or 'ошибка'}")
+                print(f"ключевые моменты: {built.get('error') or 'ошибка'}", flush=True)
         except Exception as error:
-            warning = _note(warning, f"Ключевые моменты не собрались: {error}")
+            print(f"ключевые моменты продолжены без остановки: {error}", flush=True)
 
     if pending("naming"):
         enter("naming")
         try:
-            note = name_speakers(video_id, on_ratio=_band(video_id, "naming", 0.99, 0.995), folder=work / "naming")
-            if note:
-                warning = _note(warning, note)
+            name_speakers(video_id, on_ratio=_band(video_id, "naming", 0.99, 0.995), folder=work / "naming")
         except Exception as error:
-            warning = _note(warning, f"Автоименование не выполнено: {error}")
+            print(f"автоименование продолжено без остановки: {error}", flush=True)
     if warning:
         set_warning(video_id, warning)
 

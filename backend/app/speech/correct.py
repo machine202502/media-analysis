@@ -192,7 +192,15 @@ def chunk_capital(words: list[dict], index: int) -> bool:
 def decide_keep(words: list[dict], index: int, model: str) -> bool | None:
     if chunk_capital(words, index):
         return False
-    return _keep_capital(_ask_keep(words, index, model))
+    for _attempt in range(2):
+        try:
+            parsed = _keep_capital(_ask_keep(words, index, model))
+        except Exception as error:
+            print(f"буква не спросилась: {error}", flush=True)
+            return None
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def _candidates(words: list[dict]) -> list[int]:
@@ -332,7 +340,11 @@ def _correct_segment(segment: dict, *, model: str, label: str) -> dict:
 
     for index in _candidates(words):
         token = words[index]["text"]
-        keep = decide_keep(words, index, model)
+        try:
+            keep = decide_keep(words, index, model)
+        except Exception as error:
+            print(f"{label} {index} {token}: {error}", flush=True)
+            continue
         if keep is not False:
             if keep is None:
                 print(f"{label} {index} {token}: не разобрал, оставляю", flush=True)

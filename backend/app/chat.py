@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 import urllib.error
 import urllib.request
 from uuid import UUID
@@ -27,7 +28,7 @@ _UNDER = re.compile(r"__(.+?)__", re.S)
 _CODE = re.compile(r"`([^`]+)`")
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _HEAD = re.compile(r"(?m)^\s{0,3}#{1,6}\s+")
-_BULLET = re.compile(r"(?m)^\s*(?:[-*+]|\d+[.)])\s+")
+_BULLET = re.compile(r"(?m)^\s*[-*+]\s+")
 _ITALIC = re.compile(r"(?m)(?<!\*)\*(?!\s)([^*\n]+?)\*(?!\*)")
 _QUOTE = re.compile(r"@\[(.+?)\s+(\d+:\d{2}(?::\d{2})?)-(\d+:\d{2}(?::\d{2})?)\]")
 
@@ -128,9 +129,19 @@ class StopFlag:
                 pass
 
 
-def _generate(system: str, prompt: str, cancel: StopFlag | None = None) -> str:
+def _generate(
+    system: str,
+    prompt: str,
+    cancel: StopFlag | None = None,
+    *,
+    limit: int = 420,
+    context: int | None = None,
+) -> str:
     if cancel is not None and cancel.stopped():
         raise Halt()
+    options: dict = {"temperature": 0.2, "num_predict": limit}
+    if context:
+        options["num_ctx"] = context
     payload = json.dumps(
         {
             "model": CHAT_MODEL,
@@ -138,7 +149,7 @@ def _generate(system: str, prompt: str, cancel: StopFlag | None = None) -> str:
             "prompt": prompt,
             "stream": False,
             "think": False,
-            "options": {"temperature": 0.2, "num_predict": 420},
+            "options": options,
         }
     ).encode("utf-8")
     request = urllib.request.Request(
@@ -146,19 +157,28 @@ def _generate(system: str, prompt: str, cancel: StopFlag | None = None) -> str:
         data=payload,
         headers={"Content-Type": "application/json"},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=180) as response:
-            if cancel is not None:
-                cancel.arm(response)
-                if cancel.stopped():
-                    raise Halt()
-            body = json.loads(response.read().decode("utf-8"))
-    except Halt:
-        raise
-    except urllib.error.URLError as error:
-        if cancel is not None and cancel.stopped():
-            raise Halt() from error
-        raise RuntimeError(f"Ollama недоступна ({error})") from error
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                if cancel is not None:
+                    cancel.arm(response)
+                    if cancel.stopped():
+                        raise Halt()
+                body = json.loads(response.read().decode("utf-8"))
+            break
+        except Halt:
+            raise
+        except urllib.error.URLError as error:
+            if cancel is not None and cancel.stopped():
+                raise Halt() from error
+            last_error = error
+            if attempt < 2 and "timed out" in str(error).casefold():
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise RuntimeError(f"Ollama недоступна ({error})") from error
+    else:
+        raise RuntimeError(f"Ollama недоступна ({last_error})") from last_error
     if cancel is not None and cancel.stopped():
         raise Halt()
     return str(body.get("response", "")).strip()

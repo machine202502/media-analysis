@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import UUID
 
 from .chat import clock
-from .config import MERGE_MODEL
+from .config import AGENT_CONTEXT, MERGE_MODEL
 from .db import (
     fail_index,
     fetch_index,
@@ -25,12 +25,18 @@ from .db import (
     mark_index_building,
     moments_index,
 )
-from .embedder import embed_saved
+from .embedder import embed, embed_saved
 from .speech.ollama import generate
 
 MOMENTS_NAME = "Ключевые моменты"
 WINDOW_SEC = 600
 MAX_CHARS = 12000
+WINDOW_CHARS = 7000
+WINDOW_LIMIT = 900
+OVERLAP_SEC = 30.0
+SAME_POINT = 0.92
+TWIN_POINT = 0.97
+MERGE_CALLS = 40
 MIN_CHAPTER = 50.0
 PAUSE_CUT = 2.5
 SPEAKER_CUT = 1.0
@@ -197,17 +203,31 @@ def _build(index_id: UUID, on_ratio=None, spans=None, folder: Path | None = None
         if chunk_entries:
             entries.extend(chunk_entries)
     if not entries:
-        fail_index(index_id, errors[0] if errors else "Подходящих пунктов не нашлось")
+        total = len(windows)
+        if errors:
+            message = f"Модель не разобрала {len(errors)} из {total} кусков: {errors[0]}"
+        else:
+            message = f"Подходящих пунктов не нашлось ни в одном из {total} кусков по этому поручению"
+        fail_index(index_id, message)
         return
-    _embed_entries(index_id, row, entries, on_ratio, folder, tick)
+    _embed_entries(index_id, row, entries, on_ratio, folder, tick, fold=True)
 
 
-def _embed_entries(index_id: UUID, row: dict, entries: list[dict], on_ratio, folder: Path | None, tick=None) -> None:
+def _embed_entries(
+    index_id: UUID,
+    row: dict,
+    entries: list[dict],
+    on_ratio,
+    folder: Path | None,
+    tick=None,
+    *,
+    fold: bool = False,
+) -> None:
     def embed_ratio(ratio: float) -> None:
         if tick is not None:
-            tick(0.85 + 0.15 * ratio)
+            tick(0.85 + 0.1 * ratio)
         elif on_ratio is not None:
-            on_ratio(0.85 + 0.15 * ratio)
+            on_ratio(0.85 + 0.1 * ratio)
 
     vectors = embed_saved(
         [item["text"] for item in entries],
@@ -218,10 +238,104 @@ def _embed_entries(index_id: UUID, row: dict, entries: list[dict], on_ratio, fol
     )
     for item, vector in zip(entries, vectors, strict=True):
         item["embedding"] = vector
+    if fold:
+        raw = len(entries)
+        entries = _fold_repeats(entries, row["video_id"])
+        print(f"{index_id} свёртка повторов: {raw} → {len(entries)}", flush=True)
     finish_index(index_id, row["video_id"], entries)
     if on_ratio is not None:
         on_ratio(1)
     print(f"{index_id} индекс готов, пунктов {len(entries)}", flush=True)
+
+
+def _fold_repeats(entries: list[dict], video_id) -> list[dict]:
+    """Одна мысль, сказанная в разных местах, становится одним общим пунктом со всеми метками времени."""
+    ordered = sorted(entries, key=lambda item: (float(item["start"]), float(item["end"])))
+    groups: list[list[dict]] = []
+    for item in ordered:
+        best: list[dict] | None = None
+        score = SAME_POINT
+        for members in groups:
+            similarity = _similarity(item["embedding"], members[0]["embedding"])
+            if similarity >= score:
+                best, score = members, similarity
+        if best is None:
+            groups.append([item])
+        else:
+            best.append(item)
+    folded: list[dict] = []
+    renamed: list[dict] = []
+    calls = 0
+    for members in groups:
+        if len(members) == 1:
+            folded.append(members[0])
+            continue
+        twins = all(_similarity(item["embedding"], members[0]["embedding"]) >= TWIN_POINT for item in members)
+        if twins:
+            text = max((item["text"] for item in members), key=len)
+        elif calls < MERGE_CALLS:
+            calls += 1
+            text = _merged_text(members)
+        else:
+            text = None
+        if text is None:
+            folded.extend(members)
+            continue
+        first = members[0]
+        merged = {"start": first["start"], "end": first["end"], "text": text, "embedding": first["embedding"]}
+        marks = _distinct_marks(members)
+        if len(marks) > 1:
+            merged["text"] = f"{text} Звучит: {', '.join(marks)}."[:600]
+        if merged["text"] != first["text"]:
+            renamed.append(merged)
+        folded.append(merged)
+    if renamed:
+        try:
+            vectors = embed([item["text"] for item in renamed], query=False, video_id=video_id)
+        except Exception as error:
+            print(f"векторы свёрнутых пунктов не пересчитаны: {error}", flush=True)
+        else:
+            for item, vector in zip(renamed, vectors, strict=True):
+                item["embedding"] = vector
+    folded.sort(key=lambda item: (float(item["start"]), float(item["end"])))
+    return folded
+
+
+def _similarity(left: list[float], right: list[float]) -> float:
+    return sum(a * b for a, b in zip(left, right))
+
+
+def _distinct_marks(members: list[dict]) -> list[str]:
+    marks: list[str] = []
+    last: float | None = None
+    for item in members:
+        start = float(item["start"])
+        if last is not None and start - last < OVERLAP_SEC * 2:
+            continue
+        marks.append(clock(start))
+        last = start
+    return marks
+
+
+def _merged_text(members: list[dict]) -> str | None:
+    points = "\n".join(f"{number}. {item['text']}" for number, item in enumerate(members[:8], start=1))
+    prompt = (
+        "Пункты ниже выписаны из разных мест одного ролика.\n"
+        f"{points}\n\n"
+        "Если все они про одну и ту же мысль, сведи их в одно общее предложение: суть и все конкретные "
+        "детали из пунктов — примеры, цифры, условия. Ничего не добавляй от себя.\n"
+        'Ответ — только JSON: {"same": true, "text": "..."}. '
+        'Если это разные мысли, ответ {"same": false}.'
+    )
+    try:
+        data = _parse_object(generate(prompt, MERGE_MODEL, limit=300, context=AGENT_CONTEXT))
+    except Exception as error:
+        print(f"свёртка пунктов не выполнилась: {error}", flush=True)
+        return None
+    if not isinstance(data, dict) or data.get("same") is not True:
+        return None
+    text = " ".join(str(data.get("text") or "").split())
+    return text[:500] or None
 
 
 def _stage_folder(video_id: UUID, name: str) -> Path | None:
@@ -236,33 +350,37 @@ def _task(row: dict) -> str:
     if row["kind"] == "moments":
         return _MOMENTS_TASK
     instruction = (row.get("instruction") or "").strip()
-    return f"Индекс «{row['name']}». {instruction} Один пункт — одна находка, коротко."
+    return f"Собираем индекс «{row['name']}». Поручение: {instruction} Один пункт — одна находка."
 
 
-def _windows(segments: list[dict]) -> list[list[dict]]:
+def _windows(segments: list[dict], max_chars: int = WINDOW_CHARS) -> list[list[dict]]:
+    """Куски по времени и объёму. Хвост прошлого куска повторяется в начале следующего,
+    чтобы мысль на стыке попала в один кусок целиком."""
     windows: list[list[dict]] = []
     current: list[dict] = []
-    origin: float | None = None
+    fresh = 0
+    origin = 0.0
     chars = 0
-    for chapter in _topic_chapters(segments):
-        piece = sum(len(segment["text"]) + 16 for segment in chapter)
-        start = float(chapter[0]["start_sec"])
-        overflows = current and (
-            chars + piece > MAX_CHARS or (origin is not None and start >= origin + WINDOW_SEC)
-        )
-        if overflows:
+    for segment in segments:
+        start = float(segment["start_sec"])
+        piece = len(segment["text"]) + 16
+        if fresh and (start >= origin + WINDOW_SEC or chars + piece > max_chars):
             windows.append(current)
-            current = []
-            origin = None
-            chars = 0
-        if not current and piece > MAX_CHARS:
-            windows.extend(_cut_long(chapter))
-            continue
-        if origin is None:
+            tail_end = float(current[-1]["end_sec"])
+            carried = [row for row in current if float(row["start_sec"]) >= tail_end - OVERLAP_SEC]
+            too_far = start - tail_end > OVERLAP_SEC
+            if too_far or sum(len(row["text"]) + 16 for row in carried) > max_chars // 4 or len(carried) == len(current):
+                carried = []
+            current = carried
+            fresh = 0
+            chars = sum(len(row["text"]) + 16 for row in current)
+            origin = float(current[0]["start_sec"]) if current else start
+        if not current:
             origin = start
-        current.extend(chapter)
+        current.append(segment)
+        fresh += 1
         chars += piece
-    if current:
+    if fresh:
         windows.append(current)
     return windows
 
@@ -285,26 +403,6 @@ def _topic_chapters(segments: list[dict]) -> list[list[dict]]:
         chapters[-2].extend(chapters[-1])
         chapters.pop()
     return chapters
-
-
-def _cut_long(segments: list[dict]) -> list[list[dict]]:
-    windows: list[list[dict]] = []
-    current: list[dict] = []
-    origin = float(segments[0]["start_sec"])
-    chars = 0
-    for segment in segments:
-        start = float(segment["start_sec"])
-        piece = len(segment["text"]) + 16
-        if current and (start >= origin + WINDOW_SEC or chars + piece > MAX_CHARS):
-            windows.append(current)
-            current = []
-            origin = start
-            chars = 0
-        current.append(segment)
-        chars += piece
-    if current:
-        windows.append(current)
-    return windows
 
 
 def _span(segments: list[dict]) -> float:
@@ -394,7 +492,11 @@ def _collect_moments(segments: list[dict], folder: Path | None, on_ratio, *, agg
 
     def produce(index: int) -> dict:
         start, end, rows = bounded[index]
-        entry = _topic_entry(rows, start, end)
+        try:
+            entry = _topic_entry(rows, start, end)
+        except Exception as error:
+            print(f"moments topic {index + 1} skipped: {error}", flush=True)
+            return {"skip": True}
         if entry is None:
             print(f"moments topic {index + 1} empty", flush=True)
             return {"skip": True}
@@ -892,8 +994,10 @@ def _ask_window(segments: list[dict], task: str, *, required: bool) -> list[dict
     if required:
         prompts.append(_force_prompt(task, body))
     last_error: Exception | None = None
-    for prompt in prompts:
-        raw = generate(prompt, MERGE_MODEL, limit=700)
+    repaired = False
+    while prompts:
+        prompt = prompts.pop(0)
+        raw = generate(prompt, MERGE_MODEL, limit=WINDOW_LIMIT, context=AGENT_CONTEXT)
         try:
             found = _keep(_parse_items(raw), window_start, window_end)
         except Exception as error:
@@ -901,14 +1005,21 @@ def _ask_window(segments: list[dict], task: str, *, required: bool) -> list[dict
             sentence = _plain(raw) if required else ""
             if sentence:
                 return [{"start": window_start, "end": window_end, "text": sentence}]
+            if not required and not repaired:
+                repaired = True
+                prompts.append(_repair_prompt(task, body))
             continue
         if found:
             return found
         if required:
             print("окно вернуло пустой список, повтор запроса", flush=True)
+        else:
+            return []
     if not required:
+        if last_error is not None:
+            raise last_error
         return []
-    sentence = _plain(generate(_sentence_prompt(task, body), MERGE_MODEL, limit=160))
+    sentence = _plain(generate(_sentence_prompt(task, body), MERGE_MODEL, limit=160, context=AGENT_CONTEXT))
     if not sentence:
         if last_error is not None:
             raise last_error
@@ -916,23 +1027,40 @@ def _ask_window(segments: list[dict], task: str, *, required: bool) -> list[dict
     return [{"start": window_start, "end": window_end, "text": sentence}]
 
 
+_ITEM_RULES = (
+    "start и end — время из меток реплик, где прозвучала находка: строка вида \"12:34\" или число секунд.\n"
+    "text — одна находка своими словами: законченное предложение, понятное без остального текста, "
+    "с конкретикой из реплик — что именно, зачем, пример или цифра, если они есть. "
+    "Не пересказывай поручение и не пиши общих слов вроде «спикер рассказывает о теме».\n"
+)
+
+
 def _json_prompt(task: str, body: str, *, required: bool) -> str:
     if required:
         order = (
-            f"{task}\n"
             "Выжимка по заданию обязательна в каждом отрезке, даже если совпадение неполное.\n"
             "Ответ — только JSON-массив из 1–6 объектов с полями start, end и text.\n"
-            "start и end — секунды из меток. text — короткая выжимка своими словами, не цитата инструкции.\n"
+            f"{_ITEM_RULES}"
             "Пустой массив запрещён.\n"
         )
     else:
         order = (
-            f"{task}\n"
+            "Пройди реплики по порядку и выпиши каждую находку, которая подходит под поручение, "
+            "даже если она сказана вскользь. Похожие находки из разных мест — разные пункты.\n"
             "Если по заданию в отрезке ничего нет, верни []. Иначе от 1 до 8 пунктов.\n"
             "Ответ — только JSON-массив объектов с полями start, end и text.\n"
-            "start и end — секунды из меток. text — короткая выжимка своими словами, не цитата инструкции.\n"
+            f"{_ITEM_RULES}"
         )
-    return f"Реплики:\n{body}\n\n{order}"
+    return f"{task}\n\nРеплики с метками времени:\n{body}\n\nЗадание ещё раз: {task}\n{order}"
+
+
+def _repair_prompt(task: str, body: str) -> str:
+    return (
+        f"{task}\n\nРеплики с метками времени:\n{body}\n\n"
+        "Прошлый ответ был не JSON-массивом. Верни только JSON-массив объектов с полями start, end и text, "
+        "без текста вокруг. Если подходящего нет — [].\n"
+        f"{_ITEM_RULES}"
+    )
 
 
 def _force_prompt(task: str, body: str) -> str:
@@ -1017,6 +1145,19 @@ def _parse_items(raw: str) -> list[dict]:
 
 
 def _seconds(value: object, fallback: float) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool):
         return fallback
-    return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").strip().strip("[]")
+    if not text:
+        return fallback
+    try:
+        if ":" not in text:
+            return float(text)
+        total = 0.0
+        for part in text.split(":"):
+            total = total * 60 + float(part)
+        return total
+    except ValueError:
+        return fallback

@@ -254,7 +254,16 @@ def _anglicize_segment(segment: dict, *, model: str, label: str) -> dict:
         copied.pop("words", None)
     if not any(_cyrillic(word.get("text") or "") for word in source):
         return copied
-    parsed = _parse_fixes(_ask(source, model))
+    parsed: list = []
+    for _attempt in range(2):
+        try:
+            raw = _ask(source, model)
+        except Exception as error:
+            print(f"{label} английские написания не спросились: {error}", flush=True)
+            return copied
+        parsed = _parse_fixes(raw)
+        if parsed or raw.strip().upper().startswith("НЕТ"):
+            break
     if not parsed:
         return copied
     for index, original, fixed in parsed:

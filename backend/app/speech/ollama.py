@@ -6,10 +6,19 @@ import urllib.request
 from ..config import OLLAMA_GENERATE
 
 
-def generate(prompt: str, model: str, *, limit: int, stop: list[str] | None = None) -> str:
+def generate(
+    prompt: str,
+    model: str,
+    *,
+    limit: int,
+    stop: list[str] | None = None,
+    context: int | None = None,
+) -> str:
     options: dict = {"temperature": 0, "num_predict": limit}
     if stop:
         options["stop"] = stop
+    if context:
+        options["num_ctx"] = context
     payload = json.dumps(
         {
             "model": model,

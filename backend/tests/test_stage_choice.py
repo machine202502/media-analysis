@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.agent import _lines, plain_step
+from app.agent_tools import _lines
 from app.analyze import stage_enabled
 
 
@@ -27,13 +27,6 @@ class StageChoiceTests(unittest.TestCase):
         self.assertNotIn("SPEAKER", text)
         self.assertNotIn(":", text.split("]", 1)[1])
         self.assertIn("привет", text)
-
-    def test_plain_step_drops_speaker_labels(self) -> None:
-        raw = "act равен reply или speakers. Спикеров называй только метками SPEAKER_ из реплик. "
-        quiet = plain_step(raw)
-        self.assertNotIn("SPEAKER", quiet)
-        self.assertNotIn("speakers", quiet)
-        self.assertIn("нет автора", quiet)
 
 
 if __name__ == "__main__":

@@ -28,8 +28,9 @@ import { Modal } from "./modal"
 import { Panes } from "./panes"
 
 const AGENT_VERSIONS = [
-  { id: "analytic", label: "agent-bear" },
-  { id: "3", label: "agent-polecat" },
+  { id: "bear", label: "agent-bear" },
+  { id: "mouse", label: "agent-mouse" },
+  { id: "zebra", label: "agent-zebra" },
 ]
 
 function liveActionStatus(actions: { title: string; detail: string; progress?: number }[]): string {
@@ -46,6 +47,7 @@ function liveActionStatus(actions: { title: string; detail: string; progress?: n
     "Обход текста": "Ищу по словам...",
     "Чтение отрезка": "Читаю отрезок...",
     "Поиск по индексу": "Ищу по индексу...",
+    "Чтение индекса": "Читаю индекс...",
     Спикеры: "Смотрю спикеров...",
     Думает: "Думает...",
   }
@@ -54,7 +56,7 @@ function liveActionStatus(actions: { title: string; detail: string; progress?: n
 
 function storedAgentVersion(): string {
   const saved = localStorage.getItem("va-agent-version")
-  if (saved === "2") return "analytic"
+  if (saved === "2" || saved === "analytic") return "bear"
   if (saved && AGENT_VERSIONS.some((version) => version.id === saved)) return saved
   return AGENT_VERSIONS[AGENT_VERSIONS.length - 1].id
 }

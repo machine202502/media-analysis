@@ -266,7 +266,6 @@ def name_speakers(video_id: UUID, on_ratio=None, folder=None) -> str | None:
     transcript = _excerpt(segments, labels)
     if on_ratio is not None:
         on_ratio(0.1)
-    warning = None
     saved = load_json(folder / "chosen.json") if folder is not None else None
     if isinstance(saved, dict) and saved.get("labels") == labels and isinstance(saved.get("chosen"), dict):
         chosen = saved["chosen"]
@@ -276,7 +275,6 @@ def name_speakers(video_id: UUID, on_ratio=None, folder=None) -> str | None:
         except Exception as error:
             print(f"{video_id} имена по тексту не получились: {error}", flush=True)
             proposals = {}
-            warning = "Имена по тексту не получились, поставлены клички"
         chosen = choose_names(labels, proposals, transcript, random.Random(), segments)
         if folder is not None:
             save_json(folder / "chosen.json", {"labels": labels, "chosen": chosen})
@@ -300,7 +298,7 @@ def name_speakers(video_id: UUID, on_ratio=None, folder=None) -> str | None:
     if on_ratio is not None:
         on_ratio(1)
     print(f"{video_id} имена: {', '.join(report)}", flush=True)
-    return warning
+    return None
 
 
 _VOWELS = set("аеёиоуыэюяaeiouy")

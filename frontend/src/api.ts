@@ -247,7 +247,7 @@ export function clearChat(id: string): Promise<{ messages: ChatMessage[] }> {
   return request(`/api/videos/${id}/chat`, { method: "DELETE" })
 }
 
-export function askAgent(id: string, message: string, version = "3"): Promise<{ pending: boolean }> {
+export function askAgent(id: string, message: string, version = "zebra"): Promise<{ pending: boolean }> {
   return request(`/api/videos/${id}/agent`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

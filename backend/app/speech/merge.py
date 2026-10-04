@@ -17,33 +17,7 @@ def _junction(text: str, *, tail: bool, words: int = 16) -> str:
     return " ".join(chosen)
 
 
-def _ask(left: str, right: str, model: str) -> bool:
-    prompt = (
-        "Реши, разрезана ли одна фраза между концом A и началом B. "
-        "Смотри только на этот стык. Заглавная буква в B не значит новое предложение.\n"
-        "Если A кончается на точку, вопрос или восклицание и B начинает другую мысль — НЕТ.\n"
-        "ДА — слово оборвано, или в конце A висит предлог, союз, «то есть», «потому что».\n"
-        "Если B повторяет последнее слово A и дальше идёт новая мысль — НЕТ.\n\n"
-        "A: он сам признаёт. Мы\n"
-        "B: зовём в катунов, которые отчаялись\n"
-        "Ответ: ДА\n\n"
-        "A: то ты просто хорош.\n"
-        "B: По дефолту. Такому кандидату много простят\n"
-        "Ответ: НЕТ\n\n"
-        "A: ну, а мы начинаем.\n"
-        "B: Шаг номер один — сбор и анализ вакансий\n"
-        "Ответ: НЕТ\n\n"
-        "A: вашими достижениями\n"
-        "B: Достижения всегда пишутся по формуле\n"
-        "Ответ: НЕТ\n\n"
-        "A: паранойя. Они видят\n"
-        "B: Накрутку в каждом втором резюме\n"
-        "Ответ: ДА\n\n"
-        f"A: {_junction(left, tail=True)}\n"
-        f"B: {_junction(right, tail=False)}\n"
-        "Ответ:"
-    )
-    answer = generate(prompt, model, limit=12, stop=["\n"]).strip()
+def _yes_no(answer: str) -> bool | None:
     for token in re.findall(r"[A-Za-zА-Яа-яЁё]+", answer.upper()):
         if token in {"ОТВЕТ", "ANSWER"}:
             continue
@@ -51,7 +25,44 @@ def _ask(left: str, right: str, model: str) -> bool:
             return True
         if token in {"НЕТ", "NO"}:
             return False
-    raise RuntimeError(f"модель ответила не ДА/НЕТ: {answer!r}")
+    return None
+
+
+def _ask_prompt(left: str, right: str, *, force: bool) -> str:
+    pair = f"A: {_junction(left, tail=True)}\nB: {_junction(right, tail=False)}\n"
+    if force:
+        return f"{pair}Одна фраза разрезана между A и B? Ответь одним словом: ДА или НЕТ."
+    return (
+        "Реши, разрезана ли одна фраза между концом A и началом B. "
+        "Смотри только на этот стык. Заглавная буква в B не значит новое предложение.\n"
+        "Если A кончается на точку, вопрос или восклицание и B начинает другую мысль — НЕТ.\n"
+        "ДА — слово оборвано, или в конце A висит предлог, союз, «то есть», «потому что».\n"
+        "Если B повторяет последнее слово A и дальше идёт новая мысль — НЕТ.\n"
+        "Ответ — одно слово: ДА или НЕТ.\n\n"
+        "A: он сам признаёт. Мы\n"
+        "B: зовём в катунов, которые отчаялись\n"
+        "Ответ: ДА\n\n"
+        "A: то ты просто хорош.\n"
+        "B: По дефолту. Такому кандидату много простят\n"
+        "Ответ: НЕТ\n\n"
+        f"{pair}Ответ:"
+    )
+
+
+def _ask(left: str, right: str, model: str) -> bool:
+    """True when the junction is one cut phrase. A bad answer is asked again, then left unjoined."""
+    last = ""
+    for force in (False, True):
+        try:
+            last = generate(_ask_prompt(left, right, force=force), model, limit=16, stop=["\n"]).strip()
+        except Exception as error:
+            print(f"стык не спросился: {error}", flush=True)
+            return False
+        parsed = _yes_no(last)
+        if parsed is not None:
+            return parsed
+    print(f"стык оставлен, ответ {last!r}", flush=True)
+    return False
 
 
 def _join_text(left: str, right: str) -> str:

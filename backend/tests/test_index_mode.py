@@ -12,6 +12,7 @@ from app.indexes import (
     _cap_ranges,
     _closed,
     _cut_atom,
+    _fold_repeats,
     _group_ranges,
     _json_prompt,
     _segments_in_spans,
@@ -19,6 +20,7 @@ from app.indexes import (
     _topic_chapters,
     _topic_prompt,
     _topics_overview,
+    _windows,
 )
 
 TASK = "Выдели советы, которые спикеры дают в этом отрезке."
@@ -49,6 +51,70 @@ class IndexModeTests(unittest.TestCase):
             found = _ask_window(WINDOW, TASK, required=False)
         self.assertEqual(found, [])
         self.assertEqual(generate.call_count, 1)
+
+    def test_strict_window_repairs_a_broken_answer_once(self) -> None:
+        answers = iter(["вот советы: стремянка", '[{"start": "0:12", "end": "0:18", "text": "Наверху нужна стремянка."}]'])
+        with patch("app.indexes.generate", side_effect=lambda *_args, **_kwargs: next(answers)) as generate:
+            found = _ask_window(WINDOW, TASK, required=False)
+        self.assertEqual(generate.call_count, 2)
+        self.assertEqual(found[0]["start"], 12.0)
+        self.assertEqual(found[0]["end"], 18.0)
+
+    def test_strict_window_reports_an_unreadable_answer(self) -> None:
+        with patch("app.indexes.generate", return_value="не знаю"):
+            with self.assertRaises(RuntimeError):
+                _ask_window(WINDOW, TASK, required=False)
+
+    def test_windows_ask_with_the_agent_context(self) -> None:
+        with patch("app.indexes.generate", return_value="[]") as generate:
+            _ask_window(WINDOW, TASK, required=False)
+        self.assertTrue(generate.call_args.kwargs.get("context"))
+
+    def test_windows_overlap_on_continuous_speech(self) -> None:
+        segments = [_line(index * 10, index * 10 + 10, "слово " * 30) for index in range(120)]
+        windows = _windows(segments, max_chars=3000)
+        self.assertGreaterEqual(len(windows), 3)
+        for left, right in zip(windows, windows[1:]):
+            self.assertLess(float(right[0]["start_sec"]), float(left[-1]["end_sec"]))
+        self.assertEqual(windows[-1][-1], segments[-1])
+
+    def test_a_long_pause_is_not_carried_over(self) -> None:
+        windows = _windows([_line(0, 10), _line(700, 710)])
+        self.assertEqual([[row["start_sec"] for row in window] for window in windows], [[0], [700]])
+
+    def test_twins_fold_without_the_model(self) -> None:
+        entries = [
+            {"start": 10.0, "end": 20.0, "text": "Отвечайте по STAR.", "embedding": [1.0, 0.0]},
+            {"start": 600.0, "end": 610.0, "text": "Отвечайте по методу STAR.", "embedding": [0.99, 0.141]},
+            {"start": 900.0, "end": 910.0, "text": "Резюме на одну страницу.", "embedding": [0.0, 1.0]},
+        ]
+        with patch("app.indexes.generate") as generate, patch("app.indexes.embed", return_value=[[0.7, 0.7]]):
+            folded = _fold_repeats(entries, None)
+        generate.assert_not_called()
+        self.assertEqual(len(folded), 2)
+        self.assertIn("Отвечайте по методу STAR.", folded[0]["text"])
+        self.assertIn("Звучит: 0:10, 10:00", folded[0]["text"])
+
+    def test_similar_points_are_merged_by_the_model(self) -> None:
+        entries = [
+            {"start": 10.0, "end": 20.0, "text": "Готовьте истории про проекты.", "embedding": [1.0, 0.0]},
+            {"start": 600.0, "end": 610.0, "text": "Заранее придумайте примеры из опыта.", "embedding": [0.93, 0.367]},
+        ]
+        merged = '{"same": true, "text": "Заранее готовьте истории и примеры из своих проектов."}'
+        with patch("app.indexes.generate", return_value=merged), patch("app.indexes.embed", return_value=[[0.9, 0.4]]):
+            folded = _fold_repeats(entries, None)
+        self.assertEqual(len(folded), 1)
+        self.assertTrue(folded[0]["text"].startswith("Заранее готовьте истории"))
+        self.assertEqual(folded[0]["embedding"], [0.9, 0.4])
+
+    def test_different_points_stay_apart(self) -> None:
+        entries = [
+            {"start": 10.0, "end": 20.0, "text": "Готовьте истории.", "embedding": [1.0, 0.0]},
+            {"start": 600.0, "end": 610.0, "text": "Спрашивайте про команду.", "embedding": [0.93, 0.367]},
+        ]
+        with patch("app.indexes.generate", return_value='{"same": false}'):
+            folded = _fold_repeats(entries, None)
+        self.assertEqual([item["text"] for item in folded], ["Готовьте истории.", "Спрашивайте про команду."])
 
     def test_soft_window_asks_until_there_is_an_extract(self) -> None:
         answers = iter(

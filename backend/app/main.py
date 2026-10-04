@@ -19,9 +19,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
+from .agent_bear import run_agent as run_bear
+from .agent_mouse import run_agent as run_mouse
+from .agent_zebra import run_agent as run_zebra
 from .analyze import notify, serve
-from .agent_v2 import run_agent as run_agent_v2
-from .agent_v3 import run_agent as run_agent_v3
 from .chat import Halt, StopFlag, ask, has_quotes, plain_text
 from .config import WORK_DIR
 from .db import (
@@ -131,7 +132,7 @@ class ChatBody(BaseModel):
 
 class AgentBody(BaseModel):
     message: str
-    version: str = "3"
+    version: str = "zebra"
 
 
 class StopBody(BaseModel):
@@ -248,12 +249,14 @@ def _finish_chat(video_id: UUID, title: str, question: str, use_lines: bool, ind
 
 
 def _agent_version(version: str) -> str:
-    if version in {"2", "analytic"}:
-        return "analytic"
-    return "3"
+    if version in {"bear", "analytic", "2"}:
+        return "bear"
+    if version == "mouse":
+        return "mouse"
+    return "zebra"
 
 
-def _finish_agent(video_id: UUID, title: str, question: str, token: int, version: str = "3") -> None:
+def _finish_agent(video_id: UUID, title: str, question: str, token: int, version: str = "zebra") -> None:
     holder: dict[str, int | None] = {"id": None}
     flag = _track_stop(video_id, "agent")
 
@@ -261,27 +264,38 @@ def _finish_agent(video_id: UUID, title: str, question: str, token: int, version
         holder["id"] = write_agent_progress(video_id, token, holder["id"], content, actions)
         return holder["id"] is not None
 
-    try:
-        runner = run_agent_v2 if version in {"2", "analytic"} else run_agent_v3
-        runner(
-            video_id,
-            title,
-            question,
-            keep_question=False,
-            defer=True,
-            on_progress=on_progress,
-            cancel=flag,
-        )
-    except Halt:
-        pass
-    except Exception as error:
-        print(f"{video_id} агент не выполнился: {error}", flush=True)
+    runner = {"bear": run_bear, "mouse": run_mouse}.get(_agent_version(version), run_zebra)
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            runner(
+                video_id,
+                title,
+                question,
+                keep_question=False,
+                defer=True,
+                on_progress=on_progress,
+                cancel=flag,
+            )
+            last_error = None
+            break
+        except Halt:
+            return
+        except Exception as error:
+            last_error = error
+            timed_out = "timed out" in str(error).casefold()
+            print(f"{video_id} агент не выполнился (попытка {attempt + 1}): {error}", flush=True)
+            if timed_out and attempt < 2:
+                time.sleep(3 * (attempt + 1))
+                continue
+            break
+    if last_error is not None:
         write_agent_progress(
             video_id,
             token,
             holder["id"],
             "Не удалось разобрать задачу.",
-            [{"title": "Сбой", "detail": str(error), "hits": []}],
+            [{"title": "Сбой", "detail": str(last_error), "hits": []}],
         )
     end_dialog(video_id, "agent", token)
     _forget_stop(video_id, "agent", flag)
