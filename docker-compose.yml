@@ -1,0 +1,98 @@
+name: video-analysis
+
+services:
+  postgres:
+    restart: unless-stopped
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: video
+      POSTGRES_PASSWORD: video
+      POSTGRES_DB: video
+    volumes:
+      - pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U video -d video"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  s3:
+    restart: unless-stopped
+    image: chrislusf/seaweedfs:latest
+    command: server -dir=/data -s3 -s3.port=8333 -s3.config=/s3.json
+    volumes:
+      - s3data:/data
+      - ./s3.json:/s3.json:ro
+
+  backend:
+    image: video-analysis-app
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://video:video@postgres:5432/video
+      S3_ENDPOINT: http://s3:8333
+      S3_ACCESS_KEY: minio
+      S3_SECRET_KEY: minio-secret
+      S3_BUCKET: videos
+      WORK_DIR: /data/work
+      OLLAMA_URL: http://host.docker.internal:11434
+      CHAT_MODEL: qwen3.5:4b
+      MERGE_MODEL: qwen3.5:4b
+      CORRECT_MODEL: qwen2.5-coder:7b
+      EMBED_MODEL: intfloat/multilingual-e5-base
+      EMBED_DIM: "768"
+      HF_HOME: /root/.cache/huggingface
+      TORCH_HOME: /root/.cache/torch
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - work:/data/work
+      - models:/root/.cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      s3:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  worker:
+    image: video-analysis-app
+    restart: unless-stopped
+    entrypoint: ["python", "-m", "app.worker"]
+    environment:
+      DATABASE_URL: postgresql://video:video@postgres:5432/video
+      WORK_DIR: /data/work
+      EMBED_MODEL: intfloat/multilingual-e5-base
+      EMBED_DIM: "768"
+      HF_HOME: /root/.cache/huggingface
+      TORCH_HOME: /root/.cache/torch
+    volumes:
+      - work:/data/work
+      - models:/root/.cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  pg:
+  s3data:
+  work:
+  models:
