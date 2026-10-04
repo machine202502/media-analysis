@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from uuid import UUID
 
@@ -22,14 +23,21 @@ from .agent_tools import _act, _clip, _objects, _public_hits, _ready_indexes, _r
 from .chat import Halt, _generate, clock, plain_text
 from .config import AGENT_CONTEXT
 from .db import add_agent, agent_summary, get_video, list_agent, speakers_wanted
-from .indexes import MOMENTS_NAME
+from .indexes import MOMENTS_NAME, _seconds
 
 MAX_STEPS = 8
 MAX_FAILURES = 3
 REVIEWS = 2
 BUILD_TRIES = 2
-UNFOCUSED = {"overview"}
-UNDERSTAND_LIMIT = 600
+UNFOCUSED = {"overview", "span"}
+UNDERSTAND_LIMIT = 800
+SUBJECT_LIMIT = 300
+WIDER_LIMIT = 300
+WIDER_PLACES = 2
+MARKED_LINES = 30
+WHOLE_SHARE = 0.9
+SUBJECT_CHARS = 7000
+SUBJECT_ITEMS = 12
 CHAT_LIMIT = 300
 STEP_LIMIT = 900
 COMPOSE_LIMIT = 1800
@@ -44,6 +52,10 @@ REVIEW_MATERIAL = 6000
 SLICE_PAD = 20.0
 SLICE_LIMIT = 20 * 60
 _ARG_KEYS = ("query", "name", "instruction", "scope", "start", "end")
+_RANGE_SPLIT = re.compile(r"\s*[–—-]\s*")
+_ROLES = ("only", "skip", "subject")
+_TO_END = {"end", "конец", "до конца"}
+_SEEK_RANGE = re.compile(r"@(\d{1,2}:\d{2}:\d{2}|\d{1,3}:\d{2})\s*[–—-]\s*@?(\d{1,2}:\d{2}:\d{2}|\d{1,3}:\d{2})")
 _BRACKET_MARK = re.compile(
     r"\[(\d{1,2}:\d{2}:\d{2}|\d{1,3}:\d{2})\s*[–—-]\s*(\d{1,2}:\d{2}:\d{2}|\d{1,3}:\d{2})\]"
 )
@@ -53,7 +65,7 @@ UNDERSTAND = (
     "Прочитай разговор и последнюю реплику и пойми, что зритель хочет получить. "
     "Верни один JSON-объект без текста вокруг:\n"
     '{"about_video": true, "reply": "", "task": "...", "form": "...", "size": "full", "need": "...", '
-    '"dialog": false, "plan": ["...", "..."]}\n'
+    '"dialog": false, "time": [], "plan": ["...", "..."]}\n'
     "about_video — true, если реплика спрашивает о содержании ролика или продолжает разговор о нём: "
     "уточняет, оспаривает или просит переделать прошлый ответ. "
     "false, если реплика обращена к тебе самому и ролик для ответа не нужен: приветствие, прощание, "
@@ -67,9 +79,62 @@ UNDERSTAND = (
     "need — что конкретно надо найти в ролике, чтобы ответить полностью.\n"
     "dialog — true, если прошлый разговор нужен для ответа: уточнение, продолжение, "
     "переформатирование прошлого ответа; false, если это новая тема.\n"
+    "time — места ролика, которые зритель назвал: таймлайном (@0:22-31:06, с 5:00 до 12:30), словами "
+    "(«первые двадцать минут», «в конце», «вторая половина») или темой из прошлого ответа агента, у которой "
+    "там есть таймлайн. Пустой список, если о времени и частях ролика речи нет. Каждый элемент:\n"
+    '  {"said": "слова зрителя о времени", "line": 0, "start": "м:сс", "end": "м:сс или end", "role": "only"}\n'
+    "  said — дословно, что зритель сказал о времени.\n"
+    "  line — если зритель ссылается на тему или пункт из прошлого ответа — номером («вторая тема») или "
+    "словами («в теме про отпуск») — номер этой строки из списка «Строки прошлого ответа с таймлайнами»; "
+    "тогда start и end не нужны. Иначе 0.\n"
+    "  «Во всём ролике», «по ходу видео», «везде», «дальше» — это не место, а то, где искать ответ: "
+    "отдельным элементом их не пиши.\n"
+    "  start и end — от начала ролика. «Первые N минут» — от 0:00 до N:00. «Последние N минут» — от "
+    "длительности минус N до end. end — до конца ролика.\n"
+    "  role — зачем зритель назвал это место:\n"
+    "    only — ответ собирать только здесь;\n"
+    "    skip — зритель просит это место пропустить: там нет нужного, ответ оттуда не брать;\n"
+    "    subject — здесь звучит сам предмет вопроса (темы, названия, люди, понятия), а ответ про него зритель "
+    "хочет собрать шире — по всему ролику или по месту only.\n"
+    "  Примеры:\n"
+    "  «что говорят про зарплаты с 12:00 до 20:00» → "
+    '[{"said": "с 12:00 до 20:00", "start": "12:00", "end": "20:00", "role": "only"}]\n'
+    "  «первые пять минут вода, дай выводы из остального» → "
+    '[{"said": "первые пять минут", "start": "0:00", "end": "5:00", "role": "skip"}]\n'
+    "  «в начале, минуте на третьей, называют три книги — что о них говорят по ходу ролика?» → "
+    '[{"said": "минуте на третьей", "start": "2:00", "end": "4:00", "role": "subject"}]\n'
+    "  «последние 15 минут — ответы на вопросы, перескажи только их» при длительности 1:00:00 → "
+    '[{"said": "последние 15 минут", "start": "45:00", "end": "end", "role": "only"}]\n'
+    "  «а что во втором пункте?» при строке прошлого ответа «2. Отпуск @14:10-19:40» → "
+    '[{"said": "во втором пункте", "line": 2, "role": "only"}]\n'
+    "  «какие советы дают в ролике» → []\n"
+    "  Не угадывай: место, которое зритель однозначно не назвал, не пиши.\n"
     "plan — 2–5 коротких шагов, как собрать материал.\n"
     "Если последняя реплика — недовольство, повтор или уточнение прошлого запроса, "
     "task — прошлый запрос с учётом претензии: что было не так и каким должен быть ответ."
+)
+WIDER = (
+    "Зритель назвал одно место видеоролика. Реши один вопрос: где искать ответ — только в этом месте "
+    "или по всему ролику.\n"
+    "Верни один JSON-объект без текста вокруг: "
+    '{"named_there": "...", "wants": "...", "wider": false}\n'
+    "named_there — что, по словам зрителя, звучит в этом месте.\n"
+    "wants — что зритель хочет получить, своими словами.\n"
+    "wider — true, если в этом месте только названо то, о чём вопрос (темы, вещи, компании, люди, этапы), "
+    "а зритель хочет узнать, что про это говорится и в других частях ролика: «по ходу ролика», «в видео», "
+    "«дальше», «везде», «где ещё». false, если зритель спрашивает, что сказано именно в этом месте.\n"
+    "Примеры:\n"
+    "«что говорят про ипотеку с 8:00 до 15:00» → false\n"
+    "«на 20-й минуте перечисляют языки программирования — как о каждом отзываются по ходу видео?» → true\n"
+    "«подробнее про третий пункт» → false\n"
+    "«в начале представили гостей — что каждый из них думает о найме?» → true"
+)
+SUBJECT = (
+    "Зритель ссылается на то, что звучит в одном отрезке ролика, а ответ хочет собрать шире. "
+    "По репликам и карточкам этого отрезка выпиши, что именно имеется в виду в задаче: конкретные названия, "
+    "предметы, людей, понятия — так, как они звучат в ролике. Только то, что подходит под задачу.\n"
+    'Верни один JSON-объект без текста вокруг: {"items": ["...", "..."]}. '
+    "items — от одного до двенадцати коротких названий; пустой список, если в отрезке этого нет."
 )
 CHAT = (
     "Ты собеседник в чате рядом с открытым видеороликом. Реплика обращена к тебе, а не к ролику. "
@@ -110,14 +175,20 @@ INDEX_GUIDE = (
     "scope all — по всему ролику: когда нужно собрать все пункты или материал разбросан по ролику. "
     "scope found — только по местам, уже найденным поиском по репликам и карточкам тем: быстро, "
     "когда тема сосредоточена в них.\n"
+    "Если в задаче сказано, где собирать ответ, сборка идёт только там: scope all — все эти отрезки, "
+    "scope found — найденные места внутри них. Места, которые зритель просил пропустить, в сборку не попадают.\n"
+    "Если в задаче назван предмет вопроса списком, впиши эти названия в instruction: модель сборки не знает, "
+    "о чём вопрос. Предмет назван в одном месте, а ответ нужен по всему ролику — это scope all.\n"
+    "Темы и состав ролика уже есть в индексе «Ключевые моменты» — для такого вопроса свой индекс не собирай.\n"
     "Если сборка не дала пунктов, то же поручение даст то же: сформулируй признак шире или проще "
     "или смени scope на all."
 )
 TOOL_TEXT = {
     "overview": (
         "overview {} — прочитать все карточки индекса «Ключевые моменты» по порядку: темы ролика "
-        "с таймлайнами и обзорные карточки (о чём видео, посыл авторов, проблемы, советы, утверждения). "
-        "Хороший первый шаг, когда вопрос про ролик целиком или неясно, где искать."
+        "с таймлайнами и обзорные карточки (список тем, о чём видео, посыл авторов, проблемы, советы, утверждения). "
+        "Хороший первый шаг, когда вопрос про ролик целиком или неясно, где искать. "
+        "На вопрос, какие в ролике темы или из чего он состоит, отвечают эти карточки."
     ),
     "moments": (
         "moments {query} — смысловой поиск по карточкам «Ключевых моментов»: "
@@ -196,7 +267,7 @@ def _flag(value: object, default: bool) -> bool:
     return default
 
 
-def parse_card(raw: str, question: str) -> dict | None:
+def parse_card(raw: str, question: str, lines: list[tuple[str, float, float]] | None = None) -> dict | None:
     for item in _objects(raw):
         task = _text(item.get("task"))
         if not task:
@@ -208,6 +279,7 @@ def parse_card(raw: str, question: str) -> dict | None:
             plan = []
         about = _flag(item.get("about_video"), True)
         return {
+            "times": parse_times(item, lines),
             "about_video": about,
             "reply": "" if about else plain_text(str(item.get("reply") or "")).strip()[:800],
             "task": task[:600],
@@ -218,6 +290,134 @@ def parse_card(raw: str, question: str) -> dict | None:
             "plan": [_text(step)[:160] for step in plan if _text(step)][:5],
         }
     return None
+
+
+def parse_range(value: object) -> tuple[float, float | None] | None:
+    """Отрезок из JSON модели. Конец None — до конца ролика."""
+    if isinstance(value, str):
+        parts = _RANGE_SPLIT.split(value.strip(), maxsplit=1)
+        value = parts if len(parts) == 2 else None
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        value = {"start": value[0], "end": value[1]}
+    if not isinstance(value, dict):
+        return None
+    start = _seconds(_bare(value.get("start")), -1.0)
+    raw_end = _bare(value.get("end"))
+    end = None if isinstance(raw_end, str) and raw_end.casefold() in _TO_END else _seconds(raw_end, -1.0)
+    if start < 0 or (end is not None and end <= start):
+        return None
+    return (start, end)
+
+
+def parse_times(item: dict, lines: list[tuple[str, float, float]] | None = None) -> list[dict]:
+    lines = lines or []
+    raw = item.get("time")
+    if raw is None and item.get("range") is not None:
+        raw = [{"range": item.get("range"), "role": "only"}]
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    found = []
+    for part in raw[:6]:
+        if not isinstance(part, dict):
+            continue
+        role = _text(part.get("role")).casefold()
+        if role not in _ROLES:
+            continue
+        line = _number(part.get("line"))
+        if 1 <= line <= len(lines):
+            span = (lines[line - 1][1], lines[line - 1][2])
+        else:
+            span = parse_range(part["range"] if "range" in part else part)
+        if span is None:
+            continue
+        found.append({"role": role, "start": span[0], "end": span[1], "said": _text(part.get("said"))[:80]})
+    return found
+
+
+def _number(value: object) -> int:
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bare(value: object) -> object:
+    return value.strip().lstrip("@").strip() if isinstance(value, str) else value
+
+
+def _union(spans: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    merged: list[list[float]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
+
+
+def _subtract(spans: list[tuple[float, float]], holes: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    left = list(spans)
+    for hole_start, hole_end in holes:
+        cut = []
+        for start, end in left:
+            if hole_end <= start or hole_start >= end:
+                cut.append((start, end))
+                continue
+            if start < hole_start:
+                cut.append((start, hole_start))
+            if hole_end < end:
+                cut.append((hole_end, end))
+        left = cut
+    return [(start, end) for start, end in left if end - start >= 1.0]
+
+
+def resolve_times(times: list[dict], duration: float | None) -> dict:
+    """Роли мест → где собирать ответ, что пропустить и где назван предмет вопроса."""
+    limit = float(duration) if duration else math.inf
+
+    def fit(part: dict) -> tuple[float, float] | None:
+        start = part["start"]
+        end = limit if part["end"] is None else min(part["end"], limit)
+        return (start, end) if start < limit and end > start else None
+
+    picked = {role: _union([span for part in times if part["role"] == role and (span := fit(part))]) for role in _ROLES}
+    if duration:
+        picked["subject"] = [span for span in picked["subject"] if span[1] - span[0] < WHOLE_SHARE * limit]
+    area = picked["only"] or None
+    skip = picked["skip"]
+    if skip:
+        rest = _subtract(area or [(0.0, limit)], skip)
+        area = rest or area
+        skip = skip if rest else []
+    return {"range": area, "skip": skip, "subject_at": picked["subject"][0] if picked["subject"] else None}
+
+
+def _mark(seconds: float) -> str:
+    return "конец" if math.isinf(seconds) else clock(seconds)
+
+
+def spans_text(spans) -> str:
+    return ", ".join(f"[{_mark(start)}–{_mark(end)}]" for start, end in spans)
+
+
+def index_spans(scope: str, hits: list[dict], area: list[tuple[float, float]] | None) -> list[dict] | None:
+    """Где собирать индекс. None — весь ролик, пустой список — найденных мест нет."""
+    whole = [{"start": round(start, 3), "end": round(end, 3)} for start, end in area] if area else None
+    if scope == "all":
+        return whole
+    spans = merge_spans(hits)
+    if not area:
+        return spans
+    inside = []
+    for span in spans:
+        for start, end in area:
+            low = max(span["start"], start)
+            high = min(span["end"], end)
+            if high > low:
+                inside.append({"start": round(low, 3), "end": round(high, 3)})
+    return inside or whole
 
 
 def parse_step(raw: str) -> dict | None:
@@ -337,11 +537,25 @@ def _dialog(summary: str, recent: list[dict]) -> str:
 
 def _card_text(card: dict) -> str:
     plan = "; ".join(card.get("plan") or []) or "нет"
+    area = card.get("range")
+    part = ""
+    if area:
+        part += f"Где собирать ответ: только {spans_text(area)}, остальной ролик не брать.\n"
+    if card.get("skip"):
+        part += f"Пропустить по просьбе зрителя: {spans_text(card['skip'])}.\n"
+    if card.get("subject_at"):
+        where = spans_text(area) if area else "по всему ролику"
+        named = "; ".join(card.get("subject") or []) or "выясни, что именно там названо"
+        part += (
+            f"Предмет вопроса назван в {spans_text([card['subject_at']])}: {named}. "
+            f"Ответ про него собирай {where}, не только в этом месте.\n"
+        )
     return (
         f"Задача: {card['task']}\n"
         f"Форма ответа: {card.get('form') or 'по смыслу задачи'}\n"
         f"Объём: {'коротко, только суть' if card.get('brief') else 'полно и подробно'}\n"
         f"Что найти: {card.get('need') or 'по смыслу задачи'}\n"
+        f"{part}"
         f"Черновой план: {plan}"
     )
 
@@ -437,12 +651,19 @@ def ask_json(generate, system: str, prompt: str, parse, limit: int):
     return parsed, raw
 
 
-def understand(generate, title: str, question: str, summary: str, recent: list[dict]) -> dict:
+def understand(
+    generate, title: str, question: str, summary: str, recent: list[dict], duration: float | None = None
+) -> dict:
+    length = clock(duration) if duration else "неизвестна"
+    lines = marked_lines(recent)
+    listed = "\n".join(f"{number}. {text}" for number, (text, _, _) in enumerate(lines, start=1))
     card, _ = ask_json(
         generate,
         UNDERSTAND,
-        f"Ролик: {title}\n{_dialog(summary, recent)}\n\nПоследняя реплика зрителя:\n{question}",
-        lambda raw: parse_card(raw, question),
+        f"Ролик: {title}. Длительность: {length}.\n{_dialog(summary, recent)}\n\n"
+        + (f"Строки прошлого ответа с таймлайнами:\n{listed}\n\n" if listed else "")
+        + f"Последняя реплика зрителя:\n{question}",
+        lambda raw: parse_card(raw, question, lines),
         UNDERSTAND_LIMIT,
     )
     if card is None:
@@ -454,9 +675,104 @@ def understand(generate, title: str, question: str, summary: str, recent: list[d
             "brief": False,
             "need": "",
             "dialog": bool(recent),
+            "times": [],
+            "range": None,
+            "skip": [],
+            "subject_at": None,
             "plan": [],
         }
+    if card["about_video"]:
+        for place in [part for part in card.get("times") or [] if part["role"] != "skip"][:WIDER_PLACES]:
+            where = f"{_mark(place['start'])}–{_mark(math.inf if place['end'] is None else place['end'])}"
+            verdict, _ = ask_json(
+                generate,
+                WIDER,
+                f"Место: «{place['said'] or where}» ({where}).\nРеплика зрителя:\n{question}",
+                parse_wider,
+                WIDER_LIMIT,
+            )
+            if verdict is not None:
+                place["role"] = "subject" if verdict else "only"
+    card.update(resolve_times(card.get("times") or [], duration))
     return card
+
+
+def parse_wider(raw: str) -> bool | None:
+    for item in _objects(raw):
+        if "wider" in item:
+            return _flag(item.get("wider"), False)
+    return None
+
+
+def marked_lines(recent: list[dict]) -> list[tuple[str, float, float]]:
+    """Строки последнего ответа агента, у которых есть таймлайн: на них зритель ссылается «второй темой»."""
+    for row in reversed(recent[-6:]):
+        if row.get("role") == "user":
+            continue
+        found = []
+        for line in str(row.get("content") or "").splitlines():
+            match = _SEEK_RANGE.search(line) or _BRACKET_MARK.search(line)
+            if not match:
+                continue
+            span = parse_range([match.group(1), match.group(2)])
+            if span is not None and span[1] is not None:
+                found.append((_clip(_text(line), 160), span[0], span[1]))
+        if found:
+            return found[:MARKED_LINES]
+    return []
+
+
+def range_text(area) -> str:
+    return f", отрезок {spans_text(area)}" if area else ""
+
+
+def card_note(card: dict) -> str:
+    parts = []
+    if card.get("range"):
+        parts.append(f"отрезок {spans_text(card['range'])}")
+    if card.get("skip"):
+        parts.append(f"без {spans_text(card['skip'])}")
+    if card.get("subject_at"):
+        parts.append(f"предмет вопроса — в {spans_text([card['subject_at']])}")
+    return (", " + ", ".join(parts)) if parts else ""
+
+
+def parse_subject(raw: str) -> list[str] | None:
+    for item in _objects(raw):
+        items = item.get("items")
+        if isinstance(items, str):
+            items = [items]
+        if not isinstance(items, list):
+            continue
+        return [_text(value)[:80] for value in items if _text(value)][:SUBJECT_ITEMS]
+    return None
+
+
+def learn_subject(generate, act, built: set[str], card: dict, push, observe) -> None:
+    """Предмет вопроса назван в одном месте, а ответ нужен шире: сначала узнать, что именно там названо."""
+    start, end = card["subject_at"]
+    spec = {"tool": "span", "start": start, "end": end}
+    try:
+        title_step, detail, body, found = act(spec, built)
+    except Halt:
+        raise
+    except Exception as error:
+        push("Шаг", f"чтение отрезка: {_clip(str(error), 200)}")
+        return
+    push(title_step, detail, found)
+    observe(0, "span", {"start": start, "end": end}, title_step, detail, body, found)
+    items, _ = ask_json(
+        generate,
+        SUBJECT,
+        f"{_card_text(card)}\n\nОтрезок {spans_text([(start, end)])}:\n{_clip(str(body), SUBJECT_CHARS)}",
+        parse_subject,
+        SUBJECT_LIMIT,
+    )
+    if items:
+        card["subject"] = items
+        push("Предмет вопроса", f"{spans_text([(start, end)])}: {'; '.join(items)}")
+    else:
+        push("Предмет вопроса", f"в {spans_text([(start, end)])} не нашлось, что именно имеется в виду")
 
 
 def small_talk(generate, card: dict, question: str, summary: str, recent: list[dict]) -> str:
@@ -518,11 +834,12 @@ def run_loop(
             publish(content)
         return {"role": "assistant", "content": content, "actions": list(actions), "citations": []}
 
-    card = understand(generate, title, question, summary, recent)
+    card = understand(generate, title, question, summary, recent, duration)
     if not card["about_video"]:
         push("Понимание задачи", "Реплика не про ролик, отвечаю без анализа.")
         return finish(small_talk(generate, card, question, summary, recent))
-    push("Понимание задачи", f"{card['task']} Форма: {card.get('form') or 'по смыслу'}.")
+    window = card.get("range")
+    push("Понимание задачи", f"{card['task']} Форма: {card.get('form') or 'по смыслу'}{card_note(card)}.")
 
     dialog = _dialog(summary, recent) if card["dialog"] else ""
     moments_ready = any(_text(row.get("name")) == MOMENTS_NAME for row in indexes)
@@ -626,10 +943,11 @@ def run_loop(
                     "или смени scope на all"
                 )
             spec = {"tool": "make_index", "name": name, "instruction": instruction}
-            if _text(args.get("scope")).casefold() != "all":
-                spans = merge_spans(hits)
-                if not spans:
-                    return "в наблюдениях ещё нет найденных мест: сначала найди их или выбери scope all"
+            scope = "all" if _text(args.get("scope")).casefold() == "all" else "found"
+            spans = index_spans(scope, hits, window)
+            if spans == []:
+                return "в наблюдениях ещё нет найденных мест: сначала найди их или выбери scope all"
+            if spans is not None:
                 spec["spans"] = spans
             return spec
         return f"инструмента «{tool}» нет"
@@ -642,7 +960,7 @@ def run_loop(
             observe(step, tool, args, title_step, detail, body, found)
             return
         tried.append(spec["instruction"].casefold())
-        live = push("Временный индекс", f"«{spec['name']}»", None, progress=0)
+        live = push("Временный индекс", f"«{spec['name']}»{range_text(window)}", None, progress=0)
 
         def on_ratio(ratio: float) -> None:
             live["progress"] = round(min(1.0, max(0.0, float(ratio))), 3)
@@ -651,6 +969,7 @@ def run_loop(
 
         spec["_on_ratio"] = on_ratio
         title_step, detail, body, found = act(spec, built)
+        detail = f"{detail}{range_text(window)}"
         live.update({"title": title_step, "detail": _clip(detail), "hits": _public_hits(found or []), "progress": 1})
         if not publish():
             raise Halt()
@@ -722,6 +1041,9 @@ def run_loop(
             if better:
                 answer = better
         return answer
+
+    if card.get("subject_at"):
+        learn_subject(generate, act, built, card, push, observe)
 
     step = 0
     turns = 0

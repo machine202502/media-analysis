@@ -46,10 +46,13 @@ from .agent_zebra import (
     _spoken_fallback,
     _text,
     ask_json,
+    card_note,
     clean_answer,
-    merge_spans,
+    index_spans,
+    learn_subject,
     parse_review,
     parse_step,
+    range_text,
     serve,
     small_talk,
     understand,
@@ -91,7 +94,7 @@ DECIDE = (
     "и как тема всё же звучит, если звучит, с таймлайнами [м:сс–м:сс].\n"
     "Если present true, опиши индекс, по которому будет собран ответ: index.name, index.instruction, index.scope.\n"
     "Если среди готовых индексов есть подходящий под задачу — index.name его точное имя, тогда он используется "
-    "без сборки. index.name пустой — только если зритель просит переделать прошлый ответ и нового материала не нужно.\n"
+    f"без сборки. Вопрос о темах и составе ролика — это готовый индекс «{MOMENTS_NAME}». index.name пустой — только если зритель просит переделать прошлый ответ и нового материала не нужно.\n"
     "queries — 1–3 запроса, которыми искать в индексе нужные пункты.\n"
     + INDEX_GUIDE
 )
@@ -224,11 +227,14 @@ def run_loop(
         push(title_step, detail, found)
         observe(step, tool, args, title_step, detail, body, found)
 
-    card = understand(generate, title, question, summary, recent)
+    card = understand(generate, title, question, summary, recent, duration)
     if not card["about_video"]:
         push("Понимание задачи", "Реплика не про ролик, отвечаю без анализа.")
         return finish(small_talk(generate, card, question, summary, recent))
-    push("Понимание задачи", f"{card['task']} Форма: {card.get('form') or 'по смыслу'}.")
+    window = card.get("range")
+    push("Понимание задачи", f"{card['task']} Форма: {card.get('form') or 'по смыслу'}{card_note(card)}.")
+    if card.get("subject_at"):
+        learn_subject(generate, act, built, card, push, observe)
 
     dialog = _dialog(summary, recent) if card["dialog"] else ""
     rule = _SPEAKERS_ON if speakers else _SPEAKERS_OFF
@@ -366,11 +372,10 @@ def run_loop(
 
     def build(name: str, instruction: str, scope: str) -> str:
         spec: dict = {"tool": "make_index", "name": name, "instruction": instruction}
-        if scope == "found":
-            spans = merge_spans(hits)
-            if spans:
-                spec["spans"] = spans
-        live = push("Временный индекс", f"«{name}»", None, progress=0)
+        spans = index_spans(scope, hits, window)
+        if spans:
+            spec["spans"] = spans
+        live = push("Временный индекс", f"«{name}»{range_text(window)}", None, progress=0)
 
         def on_ratio(ratio: float) -> None:
             live["progress"] = round(min(1.0, max(0.0, float(ratio))), 3)
@@ -384,7 +389,9 @@ def run_loop(
             raise
         except Exception as error:
             title_step, detail, body, found = "Временный индекс", f"«{name}» не собрался", str(error), []
-        live.update({"title": title_step, "detail": _clip(detail), "hits": _public_hits(found or []), "progress": 1})
+        live.update(
+            {"title": title_step, "detail": _clip(f"{detail}{range_text(window)}"), "hits": _public_hits(found or []), "progress": 1}
+        )
         if not publish():
             raise Halt()
         return str(body)

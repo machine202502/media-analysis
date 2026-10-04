@@ -32,8 +32,12 @@ from .mentions import for_search
 KEEP_TURNS = 4
 SUMMARY_AT = 6000
 OVERVIEW_CARD = 420
-OVERVIEW_CHARS = 8000
+SUMMARY_CARD = 3000
+SUMMARY_SHARE = 0.5
+OVERVIEW_CHARS = 9000
 LISTING_ROWS = 120
+SPAN_LIMIT = 30 * 60
+SPAN_CHARS = 7000
 _WORD = re.compile(r"[0-9A-Za-zА-Яа-яЁё]{4,}")
 
 
@@ -178,9 +182,18 @@ def _listing(video_id: UUID, name: str) -> tuple[str, str, str, list[dict]]:
     entries = list_index_entries(row["id"], LISTING_ROWS)
     lines: list[str] = []
     used = 0
+    covered = max((float(item["end_sec"]) for item in entries), default=0.0) - min(
+        (float(item["start_sec"]) for item in entries), default=0.0
+    )
     for item in entries:
-        stamp = f"[{clock(float(item['start_sec']))}–{clock(float(item['end_sec']))}]"
-        line = f"{stamp} {_clip(_flat(item['text']), OVERVIEW_CARD)}"
+        start, end = float(item["start_sec"]), float(item["end_sec"])
+        whole = covered > 0 and end - start >= covered * SUMMARY_SHARE
+        stamp = f"[{clock(start)}–{clock(end)}]"
+        if whole:
+            text = "\n".join(_clip(_flat(part), OVERVIEW_CARD) for part in str(item["text"]).splitlines() if part.strip())
+            line = f"{stamp} {_clip(text, SUMMARY_CARD)}"
+        else:
+            line = f"{stamp} {_clip(_flat(item['text']), OVERVIEW_CARD)}"
         if used + len(line) > OVERVIEW_CHARS:
             lines.append(f"…и ещё {len(entries) - len(lines)} пунктов, ищи их через поиск по индексу")
             break
@@ -191,6 +204,31 @@ def _listing(video_id: UUID, name: str) -> tuple[str, str, str, list[dict]]:
         for item in entries
     ]
     return "Чтение индекса", f"{row['name']}: все пункты ({len(entries)})", "\n".join(lines) or "пунктов нет", hits
+
+
+def _span(video_id: UUID, start: object, end: object) -> tuple[str, str, str, list[dict]]:
+    """Отрезок целиком: карточки тем внутри него, потом сами реплики, сколько влезет."""
+    try:
+        start_f = max(0.0, float(start))
+        end_f = float(end)
+    except (TypeError, ValueError):
+        return "Чтение отрезка", "непонятные границы", "нужны start и end в секундах", []
+    end_f = min(end_f, start_f + SPAN_LIMIT)
+    if end_f <= start_f:
+        return "Чтение отрезка", "пустой отрезок", "пустой отрезок", []
+    cards: list[str] = []
+    moments = _index_by_name(video_id, MOMENTS_NAME)
+    if moments is not None:
+        for item in list_index_entries(moments["id"], LISTING_ROWS):
+            low, high = float(item["start_sec"]), float(item["end_sec"])
+            if high <= start_f or low >= end_f or (low <= start_f and high >= end_f and high - low > 2 * (end_f - start_f)):
+                continue
+            cards.append(f"[{clock(low)}–{clock(high)}] {_clip(_flat(item['text']), OVERVIEW_CARD)}")
+    rows = segments_between(video_id, start_f, end_f)
+    _drop_authors(video_id, rows)
+    head = ("Карточки тем:\n" + "\n".join(cards) + "\n\n") if cards else ""
+    body = head + "Реплики:\n" + _clip(_lines(rows), max(1000, SPAN_CHARS - len(head)))
+    return "Чтение отрезка", f"{clock(start_f)}–{clock(end_f)}", body, _citations(rows, "m")
 
 
 def _act(video_id: UUID, action: dict, built: set[str]) -> tuple[str, str, str, list[dict]]:
@@ -228,6 +266,8 @@ def _act(video_id: UUID, action: dict, built: set[str]) -> tuple[str, str, str, 
         rows = segments_between(video_id, start_f, end_f)
         _drop_authors(video_id, rows)
         return "Чтение отрезка", f"{clock(start_f)}–{clock(end_f)}", _lines(rows), _citations(rows, "m")
+    if tool == "span":
+        return _span(video_id, action.get("start"), action.get("end"))
     if tool == "speakers":
         rows = list_speakers(video_id)
         if not rows:
