@@ -69,6 +69,19 @@ function readVolume(): number {
   return Math.min(1, Math.max(0, saved))
 }
 
+const PLAYBACK_RATES = [0.8, 1, 1.25, 1.5, 2, 3]
+
+function readPlaybackRate(): number {
+  const raw = localStorage.getItem("va-playback-rate")
+  if (!raw) return 1
+  const saved = Number(raw)
+  return PLAYBACK_RATES.includes(saved) ? saved : 1
+}
+
+function playbackLabel(rate: number): string {
+  return rate === 1 ? "1×" : `${rate}×`
+}
+
 type AnswerVoice = "f" | "m"
 
 function storedVoice(): AnswerVoice {
@@ -633,6 +646,7 @@ export function Watch() {
   const [playing, setPlaying] = useState(false)
   const [volume, setVolume] = useState(readVolume)
   const heldVolume = useRef(readVolume() || 1)
+  const [playbackRate, setPlaybackRate] = useState(readPlaybackRate)
   const [showVideo, setShowVideo] = useState(() => localStorage.getItem("va-video") !== "0")
   const [captions, setCaptions] = useState(() => localStorage.getItem("va-captions") === "1")
   const [cinema, setCinema] = useState(
@@ -775,11 +789,25 @@ export function Watch() {
     node.muted = volume === 0
   }, [volume])
 
+  useEffect(() => {
+    const node = videoRef.current
+    if (!node) return
+    node.playbackRate = playbackRate
+  }, [playbackRate])
+
   function changeVolume(next: number) {
     const level = Math.min(1, Math.max(0, next))
     if (level > 0) heldVolume.current = level
     setVolume(level)
     localStorage.setItem("va-volume", String(level))
+  }
+
+  function changePlaybackRate(index: number) {
+    const rate = PLAYBACK_RATES[index] ?? 1
+    setPlaybackRate(rate)
+    localStorage.setItem("va-playback-rate", String(rate))
+    const node = videoRef.current
+    if (node) node.playbackRate = rate
   }
 
   function seek(seconds: number) {
@@ -1309,6 +1337,7 @@ export function Watch() {
               const node = event.currentTarget
               node.volume = volume
               node.muted = volume === 0
+              node.playbackRate = playbackRate
               setDuration(node.duration || 0)
             }}
             onTimeUpdate={onTime}
@@ -1344,6 +1373,7 @@ export function Watch() {
               const node = event.currentTarget
               node.volume = volume
               node.muted = volume === 0
+              node.playbackRate = playbackRate
               setDuration(node.duration || 0)
             }}
             onClick={() => {
@@ -1763,6 +1793,18 @@ export function Watch() {
           aria-label="Громкость"
           onChange={(event) => changeVolume(Number(event.target.value))}
         />
+        <label className="playback-rate" title="Скорость воспроизведения: 0.8×, 1×, 1.25×, 1.5×, 2×, 3×">
+          <input
+            type="range"
+            min={0}
+            max={PLAYBACK_RATES.length - 1}
+            step={1}
+            value={Math.max(0, PLAYBACK_RATES.indexOf(playbackRate))}
+            aria-label="Скорость воспроизведения"
+            onChange={(event) => changePlaybackRate(Number(event.target.value))}
+          />
+          <span className="rate-label">{playbackLabel(playbackRate)}</span>
+        </label>
         <button
           type="button"
           className="icon-btn"

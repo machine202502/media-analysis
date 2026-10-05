@@ -1052,7 +1052,7 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; user-sel
 .transport {
   flex: none;
   display: grid;
-  grid-template-columns: 32px auto minmax(0, 1fr) 120px 32px 32px 32px;
+  grid-template-columns: 32px auto minmax(0, 1fr) 120px 88px 32px 32px 32px;
   gap: 10px;
   align-items: center;
   padding: 8px 12px;
@@ -1060,7 +1060,21 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; user-sel
 }
 
 .transport.audio {
-  grid-template-columns: 32px auto minmax(0, 1fr) 120px 32px;
+  grid-template-columns: 32px auto minmax(0, 1fr) 120px 88px 32px;
+}
+
+.playback-rate {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.playback-rate .rate-label {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  min-width: 2.6em;
+  text-align: right;
 }
 
 .transport input[type="range"] {
@@ -1339,7 +1353,7 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; user-sel
   .stage.narrow { height: calc(100vh - 128px); min-height: 480px; }
   .pane { min-height: 120px; }
   .lib h1 { font-size: 30px; }
-  .transport { grid-template-columns: 32px minmax(0, 1fr) 84px 32px 32px 32px; }
-  .transport.audio { grid-template-columns: 32px minmax(0, 1fr) 84px 32px; }
+  .transport { grid-template-columns: 32px minmax(0, 1fr) 84px 72px 32px 32px 32px; }
+  .transport.audio { grid-template-columns: 32px minmax(0, 1fr) 84px 72px 32px; }
   .transport .time { display: none; }
 }
