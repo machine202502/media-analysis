@@ -274,7 +274,7 @@ def run_loop(
         if tool == "words":
             return {"tool": "find", "query": query}
         if tool == "read":
-            return {"tool": "read", "start": args.get("start"), "end": args.get("end")}
+            return {"tool": "read", "range": args.get("range"), "start": args.get("start"), "end": args.get("end")}
         return {"tool": "speakers"}
 
     step = 0

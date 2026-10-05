@@ -38,7 +38,12 @@ OVERVIEW_CHARS = 9000
 LISTING_ROWS = 120
 SPAN_LIMIT = 30 * 60
 SPAN_CHARS = 7000
+READ_LIMIT = 240.0
+READ_DEFAULT = 60.0
+READ_ROWS = 40
 _WORD = re.compile(r"[0-9A-Za-zА-Яа-яЁё]{4,}")
+_STAMP = r"\d{1,3}:\d{2}(?::\d{2})?(?:\.\d+)?|\d+(?:\.\d+)?"
+_TIME_RANGE = re.compile(rf"@?\[?\s*({_STAMP})\s*[–—-]\s*@?({_STAMP})\s*\]?")
 
 
 def _objects(raw: str) -> list[dict]:
@@ -105,11 +110,11 @@ def _who(row: dict) -> str:
     return ""
 
 
-def _lines(rows: list[dict]) -> str:
+def _lines(rows: list[dict], limit: int = 8) -> str:
     if not rows:
         return "ничего не нашлось"
     parts = []
-    for row in rows[:8]:
+    for row in rows[:limit]:
         stamp = f"[{clock(float(row['start_sec']))}–{clock(float(row['end_sec']))}]"
         who = _who(row)
         parts.append(f"{stamp} {who}: {row['text']}" if who else f"{stamp} {row['text']}")
@@ -206,6 +211,51 @@ def _listing(video_id: UUID, name: str) -> tuple[str, str, str, list[dict]]:
     return "Чтение индекса", f"{row['name']}: все пункты ({len(entries)})", "\n".join(lines) or "пунктов нет", hits
 
 
+def moment(value: object) -> float | None:
+    """Время в том виде, в каком модель видит его в метках: "5:59", "1:02:30", "[5:59", "@5:59".
+    Голое число — секунды."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if value >= 0 else None
+    text = str(value).strip().strip("[]@ ").replace(",", ".")
+    if not text:
+        return None
+    if ":" in text:
+        parts = text.split(":")
+        if len(parts) > 3 or not all(part.strip().replace(".", "", 1).isdigit() for part in parts):
+            return None
+        total = 0.0
+        for part in parts:
+            total = total * 60 + float(part)
+        return total
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    return number if number >= 0 else None
+
+
+def read_window(action: dict) -> tuple[float, float] | None:
+    """Границы чтения: отдельно start и end или одной строкой range "5:59-6:27", как в метках."""
+    start: object = action.get("start")
+    end: object = action.get("end")
+    joined = action.get("range")
+    if joined in (None, "") and isinstance(start, str) and _TIME_RANGE.search(start):
+        joined = start
+    if joined not in (None, ""):
+        match = _TIME_RANGE.search(str(joined))
+        if match:
+            start, end = match.group(1), match.group(2)
+    start_f = moment(start)
+    if start_f is None:
+        return None
+    end_f = moment(end)
+    if end_f is None or end_f <= start_f:
+        end_f = start_f + READ_DEFAULT
+    return start_f, min(end_f, start_f + READ_LIMIT)
+
+
 def _span(video_id: UUID, start: object, end: object) -> tuple[str, str, str, list[dict]]:
     """Отрезок целиком: карточки тем внутри него, потом сами реплики, сколько влезет."""
     try:
@@ -255,17 +305,19 @@ def _act(video_id: UUID, action: dict, built: set[str]) -> tuple[str, str, str, 
         _drop_authors(video_id, rows)
         return "Обход текста", ", ".join(words), _lines(rows), _citations(rows, "m")
     if tool == "read":
-        try:
-            start_f = max(0.0, float(action.get("start")))
-            end_f = float(action.get("end"))
-        except (TypeError, ValueError):
-            return "Чтение отрезка", "непонятные границы", "нужны start и end в секундах", []
-        if end_f <= start_f:
-            end_f = start_f + 60
-        end_f = min(end_f, start_f + 240)
+        window = read_window(action)
+        if window is None:
+            return (
+                "Чтение отрезка",
+                "непонятные границы",
+                'нужно время как в метках: start "5:59", end "6:27" или range "5:59-6:27"',
+                [],
+            )
+        start_f, end_f = window
         rows = segments_between(video_id, start_f, end_f)
         _drop_authors(video_id, rows)
-        return "Чтение отрезка", f"{clock(start_f)}–{clock(end_f)}", _lines(rows), _citations(rows, "m")
+        body = _lines(rows, READ_ROWS)
+        return "Чтение отрезка", f"{clock(start_f)}–{clock(end_f)}", body, _citations(rows, "m")
     if tool == "span":
         return _span(video_id, action.get("start"), action.get("end"))
     if tool == "speakers":

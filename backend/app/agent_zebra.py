@@ -51,7 +51,7 @@ MATERIAL_BUDGET = 11000
 REVIEW_MATERIAL = 6000
 SLICE_PAD = 20.0
 SLICE_LIMIT = 20 * 60
-_ARG_KEYS = ("query", "name", "instruction", "scope", "start", "end")
+_ARG_KEYS = ("query", "name", "instruction", "scope", "range", "start", "end")
 _RANGE_SPLIT = re.compile(r"\s*[–—-]\s*")
 _ROLES = ("only", "skip", "subject")
 _TO_END = {"end", "конец", "до конца"}
@@ -200,8 +200,9 @@ TOOL_TEXT = {
     ),
     "words": "words {query} — точный поиск слов в расшифровке: имена, термины, числа, названия.",
     "read": (
-        "read {start, end} — прочитать расшифровку подряд, в секундах, до 240 секунд за раз. "
-        "Раскрывает детали вокруг найденного места: аргументы, примеры, выводы."
+        'read {range} — прочитать расшифровку подряд, до 4 минут за раз. range — отрезок так, как он записан '
+        'в метках материала или в вопросе зрителя: "5:59-6:27", "1:02:10-1:05:00". Перепиши метку как есть, '
+        "ничего не пересчитывай в секунды. Раскрывает детали вокруг найденного места: аргументы, примеры, выводы."
     ),
     "index_search": (
         "index_search {name, query} — смысловой поиск в готовом индексе из списка, 8 ближайших пунктов. "
@@ -920,7 +921,7 @@ def run_loop(
         if tool == "words":
             return {"tool": "find", "query": query}
         if tool == "read":
-            return {"tool": "read", "start": args.get("start"), "end": args.get("end")}
+            return {"tool": "read", "range": args.get("range"), "start": args.get("start"), "end": args.get("end")}
         if tool == "speakers":
             return {"tool": "speakers"}
         if tool == "index_search":
